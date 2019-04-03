@@ -28,6 +28,15 @@ const (
 	ConnectProxyAuthHijack
 )
 
+var ConnectActionMap = map[ConnectActionLiteral]string{
+	ConnectAccept:          "ConnectAccept",
+	ConnectReject:          "ConnectReject",
+	ConnectMitm:            "ConnectMitm",
+	ConnectHijack:          "ConnectHijack",
+	ConnectHTTPMitm:        "ConnectHTTPMitm",
+	ConnectProxyAuthHijack: "ConnectProxyAuthHijack",
+}
+
 var (
 	OkConnect       = &ConnectAction{Action: ConnectAccept, TLSConfig: TLSConfigFromCA(&GoproxyCa)}
 	MitmConnect     = &ConnectAction{Action: ConnectMitm, TLSConfig: TLSConfigFromCA(&GoproxyCa)}
@@ -77,7 +86,7 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 		panic("Cannot hijack connection " + e.Error())
 	}
 
-	ctx.Logf("Running %d CONNECT handlers", len(proxy.httpsHandlers))
+	//ctx.Logf("Running %d CONNECT handlers", len(proxy.httpsHandlers))
 	todo, host := OkConnect, r.URL.Host
 	for i, h := range proxy.httpsHandlers {
 		newtodo, newhost := h.HandleConnect(host, ctx)
@@ -85,7 +94,8 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 		// If found a result, break the loop immediately
 		if newtodo != nil {
 			todo, host = newtodo, newhost
-			ctx.Logf("on %dth handler: %v %s", i, todo, host)
+			ctx.Logf("on %dth handler: ConnectActionn[%s]  remoteAddr[%s]  targetHost[%s]",
+				i, ConnectActionMap[todo.Action], r.RemoteAddr, host)
 			break
 		}
 	}
