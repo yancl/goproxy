@@ -248,7 +248,9 @@ func (pcond *ReqProxyConds) HijackConnect(f func(req *http.Request, client net.C
 					return nil, ""
 				}
 			}
-			return &ConnectAction{Action: ConnectHijack, Hijack: f}, host
+			//return &ConnectAction{Action: ConnectHijack, Hijack: f}, host
+			HijackConnect.Hijack = f
+			return HijackConnect, host
 		}))
 }
 
