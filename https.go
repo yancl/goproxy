@@ -94,7 +94,7 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 		// If found a result, break the loop immediately
 		if newtodo != nil {
 			todo, host = newtodo, newhost
-			ctx.Logf("on %dth handler: ConnectActionn[%s]  remoteAddr[%s]  targetHost[%s]",
+			ctx.Logf("on %dth handler: ConnectAction[%s]  remoteAddr[%s]  targetHost[%s]",
 				i, ConnectActionMap[todo.Action], r.RemoteAddr, host)
 			break
 		}
