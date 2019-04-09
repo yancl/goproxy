@@ -40,6 +40,7 @@ var ConnectActionMap = map[ConnectActionLiteral]string{
 var (
 	OkConnect       = &ConnectAction{Action: ConnectAccept, TLSConfig: TLSConfigFromCA(&GoproxyCa)}
 	MitmConnect     = &ConnectAction{Action: ConnectMitm, TLSConfig: TLSConfigFromCA(&GoproxyCa)}
+	HijackConnect   = &ConnectAction{Action: ConnectHijack, TLSConfig: TLSConfigFromCA(&GoproxyCa)}
 	HTTPMitmConnect = &ConnectAction{Action: ConnectHTTPMitm, TLSConfig: TLSConfigFromCA(&GoproxyCa)}
 	RejectConnect   = &ConnectAction{Action: ConnectReject, TLSConfig: TLSConfigFromCA(&GoproxyCa)}
 	httpsRegexp     = regexp.MustCompile(`^https:\/\/`)
@@ -71,6 +72,20 @@ func (proxy *ProxyHttpServer) connectDial(network, addr string) (c net.Conn, err
 		return proxy.dial(network, addr)
 	}
 	return proxy.ConnectDial(network, addr)
+}
+
+// add by moooofly
+func getClientIP(r *http.Request) string {
+	ip := r.Header.Get("X-Real-Ip")
+	if ip == "" {
+		ip = r.Header.Get("X-Forwarded-For")
+		if ip == "" {
+			ip = strings.Split(r.RemoteAddr, ":")[0]
+		} else {
+			ip = strings.Split(ip, ",")[0]
+		}
+	}
+	return ip
 }
 
 func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request) {
@@ -134,6 +149,113 @@ func (proxy *ProxyHttpServer) handleHttps(w http.ResponseWriter, r *http.Request
 		ctx.Logf("Hijacking CONNECT to %s", host)
 		proxyClient.Write([]byte("HTTP/1.0 200 OK\r\n\r\n"))
 		todo.Hijack(r, proxyClient, ctx)
+
+		// add by moooofly
+		// this goes in a separate goroutine, so that the net/http server won't think we're
+		// still handling the request even after hijacking the connection. Those HTTP CONNECT
+		// request can take forever, and the server will be stuck when "closed".
+		// TODO: Allow Server.Close() mechanism to shut down this connection as nicely as possible
+		tlsConfig := defaultTLSConfig
+		if todo.TLSConfig != nil {
+			var err error
+			tlsConfig, err = todo.TLSConfig(host, ctx)
+			if err != nil {
+				httpError(proxyClient, ctx, err)
+				return
+			}
+		}
+		go func() {
+			//TODO: cache connections to the remote website
+			rawClientTls := tls.Server(proxyClient, tlsConfig)
+			if err := rawClientTls.Handshake(); err != nil {
+				ctx.Warnf("Cannot handshake client %v %v", r.Host, err)
+				return
+			}
+			defer rawClientTls.Close()
+			clientTlsReader := bufio.NewReader(rawClientTls)
+			for !isEof(clientTlsReader) {
+				req, err := http.ReadRequest(clientTlsReader)
+				var ctx = &ProxyCtx{Req: req, Session: atomic.AddInt64(&proxy.sess, 1), proxy: proxy, UserData: ctx.UserData}
+				if err != nil && err != io.EOF {
+					return
+				}
+				if err != nil {
+					ctx.Warnf("Cannot read TLS request from mitm'd client %v %v", r.Host, err)
+					return
+				}
+				req.RemoteAddr = r.RemoteAddr // since we're converting the request, need to carry over the original connecting IP as well
+
+				if !httpsRegexp.MatchString(req.URL.String()) {
+					req.URL, err = url.Parse("https://" + r.Host + req.URL.String())
+				}
+
+				// Bug fix which goproxy fails to provide request
+				// information URL in the context when does HTTPS MITM
+				ctx.Req = req
+
+				req, resp := proxy.filterRequest(req, ctx)
+				if resp == nil {
+					if err != nil {
+						ctx.Warnf("Illegal URL %s", "https://"+r.Host+req.URL.Path)
+						return
+					}
+					removeProxyHeaders(ctx, req)
+					ctx.Logf("Send Req: [%v] %v", req.Method, req.URL.String())
+
+					// NOTE(moooofly): make real client ip available
+					req.Header.Set("X-Forwarded-For", getClientIP(r))
+
+					resp, err = ctx.RoundTrip(req)
+					if err != nil {
+						ctx.Warnf("Cannot read TLS response from mitm'd server %v", err)
+						return
+					}
+					ctx.Logf("Recv Rsp: %v", resp.Status)
+				}
+				resp = proxy.filterResponse(resp, ctx)
+				defer resp.Body.Close()
+
+				text := resp.Status
+				statusCode := strconv.Itoa(resp.StatusCode) + " "
+				if strings.HasPrefix(text, statusCode) {
+					text = text[len(statusCode):]
+				}
+				// always use 1.1 to support chunked encoding
+				if _, err := io.WriteString(rawClientTls, "HTTP/1.1"+" "+statusCode+text+"\r\n"); err != nil {
+					ctx.Warnf("Cannot write TLS response HTTP status from mitm'd client: %v", err)
+					return
+				}
+				// Since we don't know the length of resp, return chunked encoded response
+				// TODO: use a more reasonable scheme
+				resp.Header.Del("Content-Length")
+				resp.Header.Set("Transfer-Encoding", "chunked")
+				// Force connection close otherwise chrome will keep CONNECT tunnel open forever
+				resp.Header.Set("Connection", "close")
+				if err := resp.Header.Write(rawClientTls); err != nil {
+					ctx.Warnf("Cannot write TLS response header from mitm'd client: %v", err)
+					return
+				}
+				if _, err = io.WriteString(rawClientTls, "\r\n"); err != nil {
+					ctx.Warnf("Cannot write TLS response header end from mitm'd client: %v", err)
+					return
+				}
+				chunked := newChunkedWriter(rawClientTls)
+				if _, err := io.Copy(chunked, resp.Body); err != nil {
+					ctx.Warnf("Cannot write TLS response body from mitm'd client: %v", err)
+					return
+				}
+				if err := chunked.Close(); err != nil {
+					ctx.Warnf("Cannot write TLS chunked EOF from mitm'd client: %v", err)
+					return
+				}
+				if _, err = io.WriteString(rawClientTls, "\r\n"); err != nil {
+					ctx.Warnf("Cannot write TLS response chunked trailer from mitm'd client: %v", err)
+					return
+				}
+			}
+			ctx.Logf("Exiting on EOF")
+		}()
+
 	case ConnectHTTPMitm:
 		proxyClient.Write([]byte("HTTP/1.0 200 OK\r\n\r\n"))
 		ctx.Logf("Assuming CONNECT is plain HTTP tunneling, mitm proxying it")
