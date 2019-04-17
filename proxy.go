@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/http"
 	"regexp"
-	"sync/atomic"
 
 	"github.com/sirupsen/logrus"
 )
@@ -100,50 +99,54 @@ func (proxy *ProxyHttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	if r.Method == "CONNECT" {
 		proxy.handleHttps(w, r)
 	} else {
-		ctx := &ProxyCtx{Req: r, Session: atomic.AddInt64(&proxy.sess, 1), proxy: proxy}
+		proxy.NonproxyHandler.ServeHTTP(w, r)
+		return
+		/*
+			ctx := &ProxyCtx{Req: r, Session: atomic.AddInt64(&proxy.sess, 1), proxy: proxy}
 
-		var err error
-		ctx.Logf("Got request %v %v %v %v", r.URL.Path, r.Host, r.Method, r.URL.String())
-		if !r.URL.IsAbs() {
-			proxy.NonproxyHandler.ServeHTTP(w, r)
-			return
-		}
-		r, resp := proxy.filterRequest(r, ctx)
-
-		if resp == nil {
-			removeProxyHeaders(ctx, r)
-			resp, err = ctx.RoundTrip(r)
-			if err != nil {
-				ctx.Error = err
-				resp = proxy.filterResponse(nil, ctx)
-				if resp == nil {
-					ctx.Logf("error read response %v %v:", r.URL.Host, err.Error())
-					http.Error(w, err.Error(), 500)
-					return
-				}
+			var err error
+			ctx.Logf("Got request %v %v %v %v", r.URL.Path, r.Host, r.Method, r.URL.String())
+			if !r.URL.IsAbs() {
+				proxy.NonproxyHandler.ServeHTTP(w, r)
+				return
 			}
-			ctx.Logf("Received response %v", resp.Status)
-		}
-		origBody := resp.Body
-		resp = proxy.filterResponse(resp, ctx)
-		defer origBody.Close()
-		ctx.Logf("Copying response to client %v [%d]", resp.Status, resp.StatusCode)
-		// http.ResponseWriter will take care of filling the correct response length
-		// Setting it now, might impose wrong value, contradicting the actual new
-		// body the user returned.
-		// We keep the original body to remove the header only if things changed.
-		// This will prevent problems with HEAD requests where there's no body, yet,
-		// the Content-Length header should be set.
-		if origBody != resp.Body {
-			resp.Header.Del("Content-Length")
-		}
-		copyHeaders(w.Header(), resp.Header, proxy.KeepDestinationHeaders)
-		w.WriteHeader(resp.StatusCode)
-		nr, err := io.Copy(w, resp.Body)
-		if err := resp.Body.Close(); err != nil {
-			ctx.Warnf("Can't close response body %v", err)
-		}
-		ctx.Logf("Copied %v bytes to client error=%v", nr, err)
+			r, resp := proxy.filterRequest(r, ctx)
+
+			if resp == nil {
+				removeProxyHeaders(ctx, r)
+				resp, err = ctx.RoundTrip(r)
+				if err != nil {
+					ctx.Error = err
+					resp = proxy.filterResponse(nil, ctx)
+					if resp == nil {
+						ctx.Logf("error read response %v %v:", r.URL.Host, err.Error())
+						http.Error(w, err.Error(), 500)
+						return
+					}
+				}
+				ctx.Logf("Received response %v", resp.Status)
+			}
+			origBody := resp.Body
+			resp = proxy.filterResponse(resp, ctx)
+			defer origBody.Close()
+			ctx.Logf("Copying response to client %v [%d]", resp.Status, resp.StatusCode)
+			// http.ResponseWriter will take care of filling the correct response length
+			// Setting it now, might impose wrong value, contradicting the actual new
+			// body the user returned.
+			// We keep the original body to remove the header only if things changed.
+			// This will prevent problems with HEAD requests where there's no body, yet,
+			// the Content-Length header should be set.
+			if origBody != resp.Body {
+				resp.Header.Del("Content-Length")
+			}
+			copyHeaders(w.Header(), resp.Header, proxy.KeepDestinationHeaders)
+			w.WriteHeader(resp.StatusCode)
+			nr, err := io.Copy(w, resp.Body)
+			if err := resp.Body.Close(); err != nil {
+				ctx.Warnf("Can't close response body %v", err)
+			}
+			ctx.Logf("Copied %v bytes to client error=%v", nr, err)
+		*/
 	}
 }
 
