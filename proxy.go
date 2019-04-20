@@ -99,7 +99,22 @@ func (proxy *ProxyHttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	if r.Method == "CONNECT" {
 		proxy.handleHttps(w, r)
 	} else {
-		proxy.NonproxyHandler.ServeHTTP(w, r)
+		// NOTE(moooofly): with the code below, client side will consider the route
+		//   path is ok and will cache this path for next time use. It make client
+		//   enter a wrong logic loop.
+		//proxy.NonproxyHandler.ServeHTTP(w, r)
+
+		hij, ok := w.(http.Hijacker)
+		if !ok {
+			panic("httpserver does not support hijacking")
+		}
+
+		proxyClient, _, e := hij.Hijack()
+		if e != nil {
+			panic("Cannot hijack connection " + e.Error())
+		}
+		//proxyClient.Write([]byte("HTTP/1.1 500 Shut you down without any reason\r\n"))
+		proxyClient.Close()
 		return
 		/*
 			ctx := &ProxyCtx{Req: r, Session: atomic.AddInt64(&proxy.sess, 1), proxy: proxy}
